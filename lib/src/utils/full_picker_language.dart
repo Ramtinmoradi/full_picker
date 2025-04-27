@@ -41,6 +41,5 @@ class FullPickerLanguage {
   String off = 'Off';
   String on = 'On';
   String auto = 'Auto';
-  String denyAccessPermission =
-      'Unfortunately, you denied access, so it is not possible to use this part';
+  String denyAccessPermission = 'Unfortunately, you denied access, so it is not possible to use this part';
 }

@@ -3,24 +3,21 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:camera/camera.dart';
-import 'package:device_orientation/device_orientation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:full_picker/full_picker.dart';
+import 'package:full_picker/src/utils/image_preview.dart';
 import 'package:full_picker/src/utils/pl.dart';
-import 'package:image/image.dart' as img;
 
 /// Custom Camera for Image and Video
 class Camera extends StatefulWidget {
   const Camera({
-    required this.imageCropper,
     required this.imageCamera,
     required this.videoCamera,
     required this.prefixName,
     super.key,
   });
 
-  final bool imageCropper;
   final bool videoCamera;
   final bool imageCamera;
   final String prefixName;
@@ -41,9 +38,11 @@ class _CameraState extends State<Camera> with WidgetsBindingObserver {
 
   IconData flashLightIcon = Icons.flash_auto;
 
-  StreamSubscription<dynamic>? _subscription;
-  DeviceOrientation currentOrientation = DeviceOrientation.portraitUp;
-
+  List<XFile> imageXFiles = <XFile>[];
+  List<Uint8List> imageBytes = <Uint8List>[];
+  List<String> imageNames = <String>[];
+  List<File> imageFiles = <File>[];
+  List<XFile> imageFilledXFiles = <XFile>[];
   @override
   void initState() {
     super.initState();
@@ -53,41 +52,8 @@ class _CameraState extends State<Camera> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
   }
 
-  Future<File> rotateWrongOrientedImage(
-    final String imagePath,
-    final DeviceOrientation orientation,
-  ) async {
-    final File originalFile = File(imagePath);
-    final Uint8List imageBytes = await originalFile.readAsBytes();
-    final img.Image? originalImage = img.decodeImage(imageBytes);
-
-    img.Image fixedImage;
-
-    if (orientation == DeviceOrientation.portraitUp) {
-      fixedImage = img.copyRotate(originalImage!, angle: 0);
-    } else if (orientation == DeviceOrientation.landscapeLeft) {
-      fixedImage = img.copyRotate(originalImage!, angle: 90);
-    } else if (orientation == DeviceOrientation.portraitDown) {
-      fixedImage = img.copyRotate(originalImage!, angle: 180);
-    } else if (orientation == DeviceOrientation.landscapeRight) {
-      fixedImage = img.copyRotate(originalImage!, angle: -90);
-    } else {
-      fixedImage = img.copyRotate(originalImage!, angle: 0);
-    }
-
-    final File fixedFile =
-        await originalFile.writeAsBytes(img.encodeJpg(fixedImage));
-
-    return fixedFile;
-  }
-
   /// init Camera
   Future<void> _init() async {
-    _subscription =
-        deviceOrientation$.listen((final DeviceOrientation orientation) {
-      currentOrientation = orientation;
-    });
-
     try {
       WidgetsFlutterBinding.ensureInitialized();
       try {
@@ -114,7 +80,6 @@ class _CameraState extends State<Camera> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
 
     controller?.dispose();
-    _subscription?.cancel();
 
     super.dispose();
   }
@@ -146,6 +111,62 @@ class _CameraState extends State<Camera> with WidgetsBindingObserver {
         children: <Widget>[
           _cameraPreviewWidget(),
           _close(),
+          ListView.builder(
+            padding: const EdgeInsets.only(bottom: 100),
+            shrinkWrap: true,
+            itemCount: imageXFiles.length,
+            itemBuilder: (final BuildContext context, final int index) => Row(
+              children: <Widget>[
+                Container(
+                  alignment: Alignment.bottomLeft,
+                  // ignore: unnecessary_null_comparison
+                  child: imageXFiles[index] == null
+                      ? const Text('No image captured')
+                      : GestureDetector(
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute<ImagePreviewView>(
+                                builder: (final BuildContext context) => ImagePreviewView(
+                                  File(imageXFiles[index].path),
+                                ),
+                              ),
+                            );
+                          },
+                          child: Stack(
+                            children: <Widget>[
+                              Image.file(
+                                File(
+                                  imageXFiles[index].path,
+                                ),
+                                height: 90,
+                                width: 60,
+                              ),
+                              Positioned(
+                                top: 0,
+                                right: 0,
+                                child: GestureDetector(
+                                  onTap: () {
+                                    setState(() {
+                                      removeImage(index);
+                                    });
+                                  },
+                                  child: Image.network(
+                                    'https://logowik.com/content/uploads/images/close1437.jpg',
+                                    height: 30,
+                                    width: 30,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                ),
+              ],
+            ),
+            scrollDirection: Axis.horizontal,
+          ),
+          Visibility(visible: imageXFiles.isNotEmpty, child: _done()),
           _buttons(context),
         ],
       ),
@@ -173,19 +194,16 @@ class _CameraState extends State<Camera> with WidgetsBindingObserver {
         onNewCameraSelected(
           Pl.isWeb
               ? cameras.lastWhere(
-                  (final CameraDescription description) =>
-                      description.lensDirection == CameraLensDirection.back,
+                  (final CameraDescription description) => description.lensDirection == CameraLensDirection.back,
                 )
               : cameras.firstWhere(
-                  (final CameraDescription description) =>
-                      description.lensDirection == CameraLensDirection.back,
+                  (final CameraDescription description) => description.lensDirection == CameraLensDirection.back,
                 ),
         );
       } catch (_) {
         onNewCameraSelected(
           cameras.lastWhere(
-            (final CameraDescription description) =>
-                description.lensDirection == CameraLensDirection.external,
+            (final CameraDescription description) => description.lensDirection == CameraLensDirection.external,
           ),
         );
       }
@@ -242,59 +260,43 @@ class _CameraState extends State<Camera> with WidgetsBindingObserver {
     unawaited(_setFlashLightIcon(context));
   }
 
+  void removeImage(final int index) {
+    setState(() {
+      imageXFiles.removeAt(index);
+    });
+  }
+
   /// Take Picture
   void onTakePictureButtonPressed() {
-    final DeviceOrientation orientation = currentOrientation;
-
     takePicture().then((final String? filePath) async {
       if (filePath == '') {
         return;
       }
-      XFile file;
+      setState(() {});
+      final XFile file = XFile(filePath!);
+      imageXFiles.add(file);
+      // if (mounted) {
+      //   final String extension = getFileExtensionFullPicker(file.path);
+      //   final String fileName = generateFileName('image');
 
-      if (firstCamera) {
-        file = XFile(
-          (await rotateWrongOrientedImage(filePath!, orientation)).path,
-        );
-      } else {
-        file = XFile(filePath!);
-      }
-
-      if (widget.imageCropper) {
-        final XFile? cropFile = await cropImage(
-          context: context,
-          sourcePath: file.path,
-        );
-
-        if (cropFile == null) {
-          return null;
-        } else {
-          file = cropFile;
-        }
-      }
-
-      if (mounted) {
-        final String extension = getFileExtensionFullPicker(file.path);
-        final String fileName = generateFileName('image');
-
-        Navigator.pop(
-          context,
-          FullPickerOutput(
-            bytes: <Uint8List?>[await file.readAsBytes()],
-            fileType: FullPickerType.image,
-            name: <String?>[fileName + extension],
-            file: <File?>[File(file.path)],
-            xFile: <XFile?>[
-              getFillXFile(
-                file: File(file.path),
-                bytes: await file.readAsBytes(),
-                mime: 'image/jpeg',
-                name: fileName + extension,
-              ),
-            ],
-          ),
-        );
-      }
+      //   Navigator.pop(
+      //     context,
+      //     FullPickerOutput(
+      //       bytes: <Uint8List?>[await file.readAsBytes()],
+      //       fileType: FullPickerType.image,
+      //       name: <String?>[fileName + extension],
+      //       file: <File?>[File(file.path)],
+      //       xFile: <XFile?>[
+      //         getFillXFile(
+      //           file: File(file.path),
+      //           bytes: await file.readAsBytes(),
+      //           mime: 'image/jpeg',
+      //           name: fileName + extension,
+      //         ),
+      //       ],
+      //     ),
+      //   );
+      // }
     });
   }
 
@@ -429,8 +431,7 @@ class _CameraState extends State<Camera> with WidgetsBindingObserver {
               maintainSize: true,
               maintainAnimation: true,
               maintainState: true,
-              visible: (widget.imageCamera && widget.videoCamera) &&
-                  toggleCameraAndTextVisibility,
+              visible: (widget.imageCamera && widget.videoCamera) && toggleCameraAndTextVisibility,
               child: Text(
                 globalFullPickerLanguage.tapForPhotoHoldForVideo,
                 style: const TextStyle(color: Color(0xa3ffffff), fontSize: 20),
@@ -465,9 +466,7 @@ class _CameraState extends State<Camera> with WidgetsBindingObserver {
                       color: Colors.transparent,
                       child: InkWell(
                         borderRadius: BorderRadius.circular(100),
-                        onLongPress: widget.videoCamera && widget.imageCamera
-                            ? videoRecord
-                            : null,
+                        onLongPress: widget.videoCamera && widget.imageCamera ? videoRecord : null,
                         onTap: () {
                           if (widget.imageCamera) {
                             if (controller!.value.isRecordingVideo) {
@@ -516,20 +515,17 @@ class _CameraState extends State<Camera> with WidgetsBindingObserver {
       firstCamera = false;
       onNewCameraSelected(
         cameras.lastWhere(
-          (final CameraDescription description) =>
-              description.lensDirection == CameraLensDirection.front,
+          (final CameraDescription description) => description.lensDirection == CameraLensDirection.front,
         ),
       );
     } else {
       onNewCameraSelected(
         Pl.isWeb
             ? cameras.lastWhere(
-                (final CameraDescription description) =>
-                    description.lensDirection == CameraLensDirection.back,
+                (final CameraDescription description) => description.lensDirection == CameraLensDirection.back,
               )
             : cameras.firstWhere(
-                (final CameraDescription description) =>
-                    description.lensDirection == CameraLensDirection.back,
+                (final CameraDescription description) => description.lensDirection == CameraLensDirection.back,
               ),
       );
       firstCamera = true;
@@ -611,6 +607,59 @@ class _CameraState extends State<Camera> with WidgetsBindingObserver {
               Icons.close,
               color: Colors.white,
               size: 33,
+            ),
+          ),
+        ),
+      );
+
+  Widget _done() => PositionedDirectional(
+        start: 0,
+        child: Padding(
+          padding: EdgeInsetsDirectional.only(
+            end: 15,
+            top: Pl.isWeb ? 10 : 26,
+          ),
+          child: InkWell(
+            onTap: () async {
+              if (mounted) {
+                for (final XFile file in imageXFiles) {
+                  imageBytes.add(await file.readAsBytes());
+                  imageNames.add('${widget.prefixName}.jpg');
+                  imageFiles.add(File(file.path));
+                  imageFilledXFiles.add(
+                    getFillXFile(
+                      file: File(file.path),
+                      bytes: await file.readAsBytes(),
+                      mime: 'image/jpeg',
+                      name: '${widget.prefixName}.jpg',
+                    ),
+                  );
+                }
+                Navigator.pop(
+                  context,
+                  FullPickerOutput(
+                    bytes: imageBytes,
+                    fileType: FullPickerType.image,
+                    name: imageNames,
+                    file: imageFiles,
+                    xFile: imageFilledXFiles,
+                  ),
+                );
+              }
+            },
+            child: Container(
+              height: 70,
+              width: 120,
+              decoration: BoxDecoration(
+                color: Colors.white38,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Center(
+                child: Text(
+                  globalFullPickerLanguage.ok,
+                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.black),
+                ),
+              ),
             ),
           ),
         ),
